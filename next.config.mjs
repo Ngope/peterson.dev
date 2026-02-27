@@ -1,5 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  experimental: {
+    outputFileTracingIncludes: {
+      '/api/chat': ['./data/**/*'],
+    },
+  },
   webpack: (config, { isServer }) => {
     if (isServer) {
       // Externalize onnxruntime-node to avoid bundling issues
