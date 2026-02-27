@@ -5,17 +5,13 @@
 
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { pipeline, env } from '@xenova/transformers';
 
 // Configure transformers.js to use WASM backend (works in serverless)
 env.backends.onnx.wasm.numThreads = 1;
+env.cacheDir = '/tmp'; // Vercel filesystem is read-only except /tmp
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const projectRoot = path.resolve(__dirname, '../..');
-
-const EMBEDDINGS_PATH = path.join(projectRoot, 'data', 'embeddings.json');
+const EMBEDDINGS_PATH = path.join(process.cwd(), 'data', 'embeddings.json');
 const EMBEDDING_MODEL = 'Xenova/all-MiniLM-L6-v2';
 
 // Cache for loaded embeddings and model
