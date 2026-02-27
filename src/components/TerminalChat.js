@@ -29,7 +29,6 @@ export default function TerminalChat() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Focus input on mount
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
@@ -66,7 +65,7 @@ export default function TerminalChat() {
             <span className="text-green-500">●</span>
             <span className="text-yellow-500">●</span>
             <span className="text-red-500">●</span>
-            <span className="ml-4">peterson@portfolio:~$</span>
+            <span className="ml-4">peterson.dev@portfolio:~$</span>
           </div>
           <div className="text-sm text-green-600">
             {remaining} messages remaining
