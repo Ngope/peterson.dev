@@ -17,6 +17,12 @@ export function useChatSession() {
 
   // Ref to prevent double-sending
   const sendingRef = useRef(false);
+  // AbortController for cancelling in-flight streams on unmount
+  const abortControllerRef = useRef(null);
+
+  useEffect(() => {
+    return () => abortControllerRef.current?.abort();
+  }, []);
 
   // Initialize session and load history
   useEffect(() => {
@@ -88,60 +94,128 @@ Try asking:
         .slice(-4)
         .map(m => ({ role: m.role, content: m.content }));
 
+      abortControllerRef.current = new AbortController();
+
       const response = await fetch('/api/chat', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: content.trim(),
           sessionId: sessionId,
           conversationHistory: history
-        })
+        }),
+        signal: abortControllerRef.current.signal
       });
 
-      const data = await response.json();
+      const contentType = response.headers.get('content-type') || '';
 
-      if (!response.ok) {
-        throw new Error(data.message || data.error || 'Failed to send message');
+      if (contentType.includes('text/event-stream')) {
+        // --- Streaming response (live Gemini call) ---
+        const assistantId = `assistant_${Date.now()}`;
+        setMessages(prev => [...prev, {
+          id: assistantId,
+          role: 'assistant',
+          content: '',
+          sources: [],
+          cached: false,
+          timestamp: new Date().toISOString()
+        }]);
+
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n\n');
+          buffer = lines.pop(); // keep any incomplete trailing chunk
+
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            const event = JSON.parse(line.slice(6));
+
+            if (event.type === 'meta') {
+              setRemaining(event.remaining);
+              setMessages(prev => prev.map(m =>
+                m.id === assistantId ? { ...m, sources: event.sources } : m
+              ));
+            } else if (event.type === 'chunk') {
+              setMessages(prev => prev.map(m =>
+                m.id === assistantId ? { ...m, content: m.content + event.text } : m
+              ));
+            } else if (event.type === 'error') {
+              throw new Error(event.message);
+            }
+          }
+        }
+      } else {
+        // --- JSON response (cache hit) ---
+        const data = await response.json();
+
+        if (!response.ok) {
+          throw new Error(data.message || data.error || 'Failed to send message');
+        }
+
+        if (data.remaining !== undefined) {
+          setRemaining(data.remaining);
+        }
+
+        setMessages(prev => [...prev, {
+          id: `assistant_${Date.now()}`,
+          role: 'assistant',
+          content: data.response,
+          sources: data.sources || [],
+          cached: data.cached || false,
+          cacheType: data.cacheType,
+          timestamp: new Date().toISOString()
+        }]);
       }
-
-      // Update remaining count
-      if (data.remaining !== undefined) {
-        setRemaining(data.remaining);
-      }
-
-      // Add assistant response
-      const assistantMessage = {
-        id: `assistant_${Date.now()}`,
-        role: 'assistant',
-        content: data.response,
-        sources: data.sources || [],
-        cached: data.cached || false,
-        cacheType: data.cacheType,
-        timestamp: new Date().toISOString()
-      };
-
-      setMessages(prev => [...prev, assistantMessage]);
 
     } catch (err) {
+      // Ignore aborts caused by component unmount
+      if (err.name === 'AbortError') return;
+
       console.error('Error sending message:', err);
       setError(err.message);
 
-      // Add error message
-      const errorMessage = {
+      setMessages(prev => [...prev, {
         id: `error_${Date.now()}`,
         role: 'error',
         content: `Error: ${err.message}`,
         timestamp: new Date().toISOString()
-      };
-
-      setMessages(prev => [...prev, errorMessage]);
+      }]);
     } finally {
       setIsLoading(false);
       sendingRef.current = false;
     }
   }, [messages, sessionId, isLoading]);
+
+  /**
+   * Add a local message pair (user echo + assistant reply) without hitting the API.
+   * Used for client-side commands (help, ls, easter eggs, etc.)
+   */
+  const addLocalMessage = useCallback((userInput, response) => {
+    setMessages(prev => [
+      ...prev,
+      {
+        id: `user_${Date.now()}`,
+        role: 'user',
+        content: userInput,
+        timestamp: new Date().toISOString()
+      },
+      {
+        id: `assistant_${Date.now() + 1}`,
+        role: 'assistant',
+        content: response,
+        sources: [],
+        cached: false,
+        timestamp: new Date().toISOString()
+      }
+    ]);
+  }, []);
 
   /**
    * Clear conversation
@@ -178,6 +252,7 @@ Try asking:
     remaining,
     sessionId,
     sendMessage,
+    addLocalMessage,
     clearConversation,
     retry
   };

@@ -157,14 +157,12 @@ export async function POST(req) {
       });
     }
 
-    // Step 5: Build prompt and call Gemini
-    console.log('Calling Gemini API...');
+    // Step 5: Build prompt
+    console.log('Calling Gemini API (streaming)...');
     const systemPrompt = buildPrompt(message, retrievedChunks);
 
-    // Build full prompt with history
     let fullPrompt = systemPrompt + '\n\nConversation:\n';
 
-    // Add recent conversation history
     if (conversationHistory.length > 0) {
       conversationHistory.slice(-4).forEach(msg => {
         fullPrompt += `${msg.role === 'user' ? 'User' : 'Assistant'}: ${msg.content}\n`;
@@ -173,41 +171,64 @@ export async function POST(req) {
 
     fullPrompt += `\nUser: ${message}\nAssistant:`;
 
-    // Call Gemini with new SDK
-    const result = await ai.models.generateContent({
+    const sources = retrievedChunks.map(chunk => ({
+      id: chunk.id,
+      source: chunk.source.replace(/^.*knowledge\//, ''),
+      section: chunk.section,
+      similarity: chunk.similarity,
+      preview: chunk.content.substring(0, 150) + '...'
+    }));
+
+    // Step 6: Stream Gemini response to client via SSE
+    const geminiStream = await ai.models.generateContentStream({
       model: "gemini-3-flash-preview",
       contents: fullPrompt,
     });
 
-    const response = result.text;
+    const encoder = new TextEncoder();
 
-    console.log(`✓ Generated response (${response.length} chars)`);
+    const readableStream = new ReadableStream({
+      async start(controller) {
+        try {
+          // Send metadata first so the client can set sources/remaining immediately
+          controller.enqueue(encoder.encode(
+            `data: ${JSON.stringify({ type: 'meta', sources, remaining: rateLimitResult.remaining })}\n\n`
+          ));
 
-    // Estimate token usage (rough approximation)
-    const tokensUsed = Math.ceil((systemPrompt.length + message.length + response.length) / 4);
+          let fullText = '';
+          for await (const chunk of geminiStream) {
+            const text = chunk.text;
+            if (text) {
+              fullText += text;
+              controller.enqueue(encoder.encode(
+                `data: ${JSON.stringify({ type: 'chunk', text })}\n\n`
+              ));
+            }
+          }
 
-    // Step 6: Cache the response
-    addToCache(message, queryEmbedding, response, retrievedChunks);
+          // Cache the completed response
+          addToCache(message, queryEmbedding, fullText, retrievedChunks);
+          console.log(`✓ Streamed response (${fullText.length} chars) in ${Date.now() - startTime}ms`);
 
-    // Step 7: Return response
-    const responseData = {
-      response: response,
-      sources: retrievedChunks.map(chunk => ({
-        id: chunk.id,
-        source: chunk.source.replace(/^.*knowledge\//, ''), // Clean path
-        section: chunk.section,
-        similarity: chunk.similarity,
-        preview: chunk.content.substring(0, 150) + '...'
-      })),
-      cached: false,
-      remaining: rateLimitResult.remaining,
-      tokensUsed: tokensUsed,
-      responseTime: Date.now() - startTime
-    };
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: 'done' })}\n\n`));
+          controller.close();
+        } catch (err) {
+          console.error('Streaming error:', err);
+          controller.enqueue(encoder.encode(
+            `data: ${JSON.stringify({ type: 'error', message: err.message })}\n\n`
+          ));
+          controller.close();
+        }
+      }
+    });
 
-    console.log(`✓ Request completed in ${responseData.responseTime}ms`);
-
-    return NextResponse.json(responseData);
+    return new Response(readableStream, {
+      headers: {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+      }
+    });
 
   } catch (error) {
     console.error('Error in chat API:', error);
